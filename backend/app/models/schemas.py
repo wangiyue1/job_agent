@@ -1,140 +1,126 @@
-from typing import List, Optional, Dict, Literal, Any
+from typing import List, Optional, Literal
 from pydantic import BaseModel, Field
-from datetime import datetime, date
 
-class BaseEntity(BaseModel):
-    id: str = Field(..., description="唯一ID")
-    source: Optional[str] = Field(None, description="数据来源")
-    created_at: Optional[datetime] = Field(None, description="创建时间")
-    updated_at: Optional[datetime] = Field(None, description="更新时间")
 
-IndustryType = Literal["internet", "finance", "healthcare", "education", "manufacturing", "new_energy", "other"]
-CompanySize = Literal["0-99", "100-999", "1000-9999", "10000+"]
-CompanyType = Literal["foreign", "private", "state_owned", "other"]
+# =========================
+# 请求模型
+# =========================
 
-class Company(BaseEntity):
-    """公司模型"""
-    name: str = Field(..., description="公司名称")
-    industry: Optional[IndustryType] = Field(None, description="所属行业")
-    stage: Optional[str] = Field(default=None, description="融资/发展阶段")
-    size: Optional[CompanySize] = Field(default=None, description="公司规模")
-    type: Optional[CompanyType] = Field(default=None, description="公司类型")
-    location: Optional[str] = Field(default=None, description="公司所在城市")
-    website: Optional[str] = None
-    introduction: Optional[str] = None
-    tags: List[str] = Field(default_factory=list, description="公司标签")
+class RiskScreeningRequest(BaseModel):
+    """技术风险预筛请求"""
+    product_name: Optional[str] = Field(default=None, description="产品名称")
+    technical_description: str = Field(..., description="技术方案/产品描述")
+    core_features: List[str] = Field(default_factory=list, description="核心功能点")
+    extra_requirements: Optional[str] = Field(default=None, description="补充说明")
 
-EducationRequirement = Literal["bachelor", "master", "phd"]
-class Job(BaseEntity):
-    """岗位模型"""
-    title: str = Field(..., description="岗位名称")
-    company_id: str = Field(..., description="所属公司ID")
-    city: List[str] = Field(default_factory=list)
-    salary_min: Optional[int] = None
-    salary_max: Optional[int] = None
-    education_requirement: Optional[EducationRequirement] = None
-    jd_text: str = Field(..., description="岗位描述原文")
-    jd_url: Optional[str] = None
-    publish_time: Optional[datetime] = None
-    deadline: Optional[datetime] = None
-    tags: List[str] = Field(default_factory=list)
 
-SkillCategory = Literal["programming_language", "large_language_model", "autonomous_driving", "other"]
-class Skill(BaseEntity):
-    """技能模型"""
-    name: str = Field(..., description="技能名称")
-    category: SkillCategory = Field(..., description="技能类别")
+class IntelligenceAnalysisRequest(BaseModel):
+    """竞品情报分析请求"""
+    keywords: List[str] = Field(default_factory=list, description="技术关键词")
+    company_names: List[str] = Field(default_factory=list, description="公司名称")
+    domain: Optional[str] = Field(default=None, description="赛道/技术方向")
+    start_date: Optional[str] = Field(default=None, description="开始日期 YYYY-MM-DD")
+    end_date: Optional[str] = Field(default=None, description="结束日期 YYYY-MM-DD")
 
-class Resume(BaseEntity):
-    """简历模型"""
-    content: str = Field(..., description="简历内容原文")  
-    skills: List[str] = Field(default_factory=list)
-    
-class ApplicationRecord(BaseEntity):
-    """投递记录模型"""
-    company_id: str = Field(..., description="公司ID")
-    job_id: str = Field(..., description="岗位ID")
-    apply_date: Optional[date] = None
-    status: Literal["applied", "interview", "offer", "rejected"] = "applied"
-    tags: List[str] = Field(default_factory=list)
 
-class LogEntry(BaseEntity):
-    """日志模型"""
-    source_type: Literal["github", "feishu", "local_doc", "other"] = "other"
-    title: Optional[str] = None
-    content: Optional[str] = None
-    log_time: Optional[date] = None
-    tags: List[str] = Field(default_factory=list)
+# =========================
+# 响应模型：最小单元
+# =========================
 
-class DocumentChunk(BaseEntity):
-    """文档切片"""
-    document_id: str = Field(..., description="原始文档ID")
-    title: Optional[str] = None
-    content: str = Field(..., description="切片内容")
-    chunk_index: int = Field(..., description="切片索引")
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+class PatentSummary(BaseModel):
+    """专利摘要信息"""
+    patent_id: str = Field(..., description="专利号/公开号")
+    title: str = Field(..., description="专利标题")
+    applicant: Optional[str] = Field(default=None, description="申请人")
+    publication_date: Optional[str] = Field(default=None, description="公开日期")
+    ipc_codes: List[str] = Field(default_factory=list, description="IPC分类号")
+    cpc_codes: List[str] = Field(default_factory=list, description="CPC分类号")
 
-class MatchResult(BaseModel):
-    """匹配结果"""
-    job_id: str = Field(..., description="岗位ID")
-    resume_id: str = Field(..., description="简历ID")
-    overall_score: float = Field(..., ge=0, le=100)
-    matched_skills: List[str] = Field(default_factory=list)
-    missing_skills: List[str] = Field(default_factory=list)
-    suggestion: str
 
-class WeeklyReport(BaseModel):
-    """周报模型"""
-    week_start: date = Field(..., description="周报开始日期")
-    week_end: date = Field(..., description="周报结束日期")
-    summary: str = Field(..., description="周报摘要")
-    completed_items: List[str] = Field(default_factory=list)
-    next_week_plan: Optional[str] = None
+class PatentEvidence(BaseModel):
+    """专利证据片段"""
+    patent_id: str = Field(..., description="专利号/公开号")
+    patent_title: str = Field(..., description="专利标题")
+    section: Literal["abstract", "claim1", "description"] = Field(..., description="证据来源章节")
+    text: str = Field(..., description="证据原文")
+    note: Optional[str] = Field(default=None, description="证据说明")
 
-# ============ 请求模型 ============
-class JobSearchRequest(BaseModel):
-    """岗位搜索请求模型"""
-    keywords: List[str] = Field(..., description="搜索关键词列表")
-    cities: List[str] = Field(default_factory=list, description="城市")
-    education: Optional[EducationRequirement] = Field(None, description="学历要求")
-    industries: List[IndustryType] = Field(default_factory=list, description="行业")
 
-class WeeklyLogRequest(BaseModel):
-    """周报请求模型"""
-    week_start: date = Field(..., description="周报开始日期")
-    week_end: date = Field(..., description="周报结束日期")
-    sources: List[Literal["github", "feishu", "local_doc", "other"]] = Field(default_factory=list, description="日志来源")
-    project_filter: Optional[List[str]] = None
+class RiskItem(BaseModel):
+    """风险点"""
+    level: Literal["high", "medium", "low", "pending_review"] = Field(..., description="风险等级")
+    title: str = Field(..., description="风险点标题")
+    description: str = Field(..., description="风险说明")
+    suggestion: Optional[str] = Field(default=None, description="建议")
+    evidences: List[PatentEvidence] = Field(default_factory=list, description="支撑证据")
 
-class ApplicationAdviceRequest(BaseModel):
-    """申请建议请求模型"""
-    include_company_analysis: bool = True
-    include_resume_match: bool = True
 
-class InsightRequest(BaseModel):
-    company_name: Optional[str] = None
-    job_name: Optional[str] = None
-    resume_id: Optional[str] = None
-    analysis_type: Literal[
-        "company_profile", "job_profile", "job_resume_match", "company_risk"
-    ]
-# ============ 响应模型 ============
-class JobSearchResponse(BaseModel):
-    jobs: List[Job]
-    total_found: int = Field(..., description="总匹配岗位数")
-    search_summary: str
+class ApplicantStat(BaseModel):
+    """申请人统计项"""
+    applicant_name: str = Field(..., description="申请人名称")
+    patent_count: int = Field(default=0, description="专利数量")
+    main_topics: List[str] = Field(default_factory=list, description="主要技术方向")
 
-class WeeklyLogResponse(BaseModel):
-    entries: List[LogEntry]
-    merged_summary: Optional[str] = None
 
-class ApplicationAdvice(BaseModel):
-    company_analysis: Optional[str] = None
-    resume_match: Optional[MatchResult] = None
-    overall_suggestion: str = Field(..., description="综合建议")
+class TrendPoint(BaseModel):
+    """时间趋势点"""
+    period: str = Field(..., description="时间区间，如 2024-Q1 / 2025-01")
+    patent_count: int = Field(default=0, description="专利数量")
 
-class InsightResult(BaseModel):
-    analysis_type: Literal[
-        "company_profile", "job_profile", "job_resume_match", "company_risk"
-    ]
-    summary: str
+
+class TechTopicItem(BaseModel):
+    """技术主题项"""
+    name: str = Field(..., description="技术主题名称")
+    keywords: List[str] = Field(default_factory=list, description="关键词")
+    summary: str = Field(..., description="主题摘要")
+    representative_patents: List[str] = Field(default_factory=list, description="代表专利号")
+
+
+# =========================
+# 响应模型：组合结果
+# =========================
+
+class RiskScreeningResult(BaseModel):
+    """技术风险预筛结果"""
+    summary: str = Field(..., description="总体结论")
+    candidate_patents: List[PatentSummary] = Field(default_factory=list, description="候选专利")
+    risk_items: List[RiskItem] = Field(default_factory=list, description="风险点列表")
+    pending_questions: List[str] = Field(default_factory=list, description="待人工确认事项")
+    disclaimer: str = Field(
+        default="本结果仅用于技术风险预筛，不构成法律意见。",
+        description="免责声明"
+    )
+
+
+class IntelligenceAnalysisResult(BaseModel):
+    """竞品情报分析结果"""
+    summary: str = Field(..., description="总体摘要")
+    top_applicants: List[ApplicantStat] = Field(default_factory=list, description="重点申请人")
+    filing_trends: List[TrendPoint] = Field(default_factory=list, description="申请趋势")
+    hot_topics: List[TechTopicItem] = Field(default_factory=list, description="技术热点/技术路线")
+    representative_patents: List[PatentSummary] = Field(default_factory=list, description="代表专利")
+
+
+# =========================
+# 响应模型：顶层响应
+# =========================
+
+class RiskScreeningResponse(BaseModel):
+    """技术风险预筛响应"""
+    success: bool = Field(..., description="是否成功")
+    message: str = Field(default="", description="响应消息")
+    data: Optional[RiskScreeningResult] = Field(default=None, description="风险预筛结果")
+
+
+class IntelligenceAnalysisResponse(BaseModel):
+    """竞品情报分析响应"""
+    success: bool = Field(..., description="是否成功")
+    message: str = Field(default="", description="响应消息")
+    data: Optional[IntelligenceAnalysisResult] = Field(default=None, description="竞品情报结果")
+
+
+class ErrorResponse(BaseModel):
+    """错误响应"""
+    success: bool = Field(default=False, description="是否成功")
+    message: str = Field(..., description="错误消息")
+    error_code: Optional[str] = Field(default=None, description="错误代码")
