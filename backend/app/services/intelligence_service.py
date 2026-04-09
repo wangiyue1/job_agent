@@ -6,10 +6,12 @@ from ..models.schemas import (
     TechTopicItem,
     TrendPoint,
 )
+from ..models.agent_structs import IntelligenceAnalysisInput
 
 def analyze_competitive_intelligence(
-    request: IntelligenceAnalysisRequest,
+    input: IntelligenceAnalysisInput,
 ) -> IntelligenceAnalysisResult:
+    request = input.request
     domain = request.domain or "通用技术方向"
 
     return IntelligenceAnalysisResult(
