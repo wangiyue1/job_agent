@@ -6,7 +6,6 @@
    - intelligence_analysis：竞品情报分析
 """
 import logging
-from unittest import result
 from langgraph.graph import StateGraph, START, END
 from typing import TypedDict, List, Literal, Optional, Dict, Any
 from ..models.schemas import(
@@ -14,14 +13,17 @@ from ..models.schemas import(
     IntelligenceAnalysisRequest,
     RiskScreeningResult,
     IntelligenceAnalysisResult,
-    PatentSummary
 )
 from ..models.agent_structs import(
     PatentSearchResult,
     RiskAnalysisInput,
-    IntelligenceAnalysisInput
+    IntelligenceAnalysisInput,
+    PatentRecord
 )
-from ..services.patent_service import search_patents, get_patent_detail
+from ..services.patent_service import (
+    pg_search_patents,
+    chroma_search_patents,
+)
 from ..services.risk_service import analyze_risk_screening
 from ..services.intelligence_service import analyze_competitive_intelligence
 
@@ -38,7 +40,13 @@ class PatentAnalysisState(TypedDict, total=False):
     risk_request: Optional[RiskScreeningRequest]
     intelligence_request: Optional[IntelligenceAnalysisRequest]
     # 中间结果
-    search_results: Optional[PatentSearchResult]
+    pg_risk_search_results: Optional[PatentSearchResult]
+    chroma_risk_search_results: Optional[PatentSearchResult]
+    merged_risk_results: Optional[PatentSearchResult]
+    
+    pg_intelligence_search_results: Optional[PatentSearchResult]
+    chroma_intelligence_search_results: Optional[PatentSearchResult]
+    merged_intelligence_results: Optional[PatentSearchResult]
     # 最终输出
     risk_result: Optional[RiskScreeningResult]
     intelligence_result: Optional[IntelligenceAnalysisResult]
@@ -51,17 +59,6 @@ class PatentAnalysisState(TypedDict, total=False):
 def _clean_parts(parts: List[Optional[str]]) -> List[str]:
     return [p.strip() for p in parts if p and p.strip()]
 
-def _to_patent_summary(record: PatentSearchResult) -> PatentSummary:
-    """将专利检索结果转换为专利摘要"""
-    return PatentSummary(
-        patent_id=record.patent_id,
-        title=record.title,
-        applicant=record.applicant,
-        publication_date=record.publication_date,
-        ipc_codes=record.ipc_codes,
-        cpc_codes=record.cpc_codes,
-    )
-
 def _build_risk_query(request: RiskScreeningRequest) -> str:
     parts: List[Optional[str]] = []
     
@@ -70,9 +67,9 @@ def _build_risk_query(request: RiskScreeningRequest) -> str:
     if request.technical_description:
         parts.append(f"技术描述: {request.technical_description}")
     if request.core_features:
-        parts.append(f"核心功能: {request.core_features}")
-    if request.core_features:
-        parts.append(f"核心技术: {request.core_technology}")
+        parts.append(f"核心功能: {';'.join(request.core_features)}")
+    if request.extra_requirements:
+        parts.append(f"补充说明: {request.extra_requirements}")
     
     return ";".join(_clean_parts(parts))
 
@@ -89,6 +86,28 @@ def _build_intelligence_query(request: IntelligenceAnalysisRequest) -> str:
         parts.extend(request.company_names)
 
     return ";".join(_clean_parts(parts))
+
+def _merge_search_results(
+    query: str,
+    pg_results: Optional[PatentSearchResult],
+    chroma_results: Optional[PatentSearchResult],
+    top_k: int = 5
+) -> PatentSearchResult:
+    # 简单的去重合并逻辑，关键词检索在前
+    # 后续可以改进为更智能的融合算法
+    merged: Dict[str, PatentRecord] = {}
+    for result in [pg_results, chroma_results]:
+        if not result:
+            continue
+        for patent in result.patents:
+            if patent.patent_id not in merged:
+                merged[patent.patent_id] = patent
+    
+    patents = list(merged.values())[:top_k]
+    return PatentSearchResult(
+        query=query,
+        patents=patents
+    )
 
 # =========================================================
 # Graph 节点
@@ -109,69 +128,148 @@ def route_task_node(state: PatentAnalysisState) -> Dict[str, Any]:
             return {"error_message": "缺少情报分析请求数据"}
     return {"mode": mode}
 
-def route_task_edge(state: PatentAnalysisState) -> str:
-    # 判断路由类型
+# =========================================================
+# Risk 并行检索节点
+# =========================================================
+
+def route_pg_risk_edge(state: PatentAnalysisState) -> str:
+    # 根据任务类型进行pg检索
     if state.get("error_message"):
         logger.error(f"路由任务失败: {state['error_message']}")
         return "end"
-    return "search_patents"
+    if state.get("mode") != "risk_analysis":
+        return "end"
+    return "pg_risk_search"
 
-def search_patents_node(state: PatentAnalysisState) -> Dict[str, Any]:
-    try:
-        mode = state.get("mode")
-        if mode == "risk_analysis":
-            request = state.get("risk_request")
-            if request is None:
-                return {"error_message": "缺少风险分析请求数据"}
-            
-            query = _build_risk_query(request)
-            patents = search_patents(query=query, top_k=10)
-            return {"search_results": patents}
-            
-        elif mode == "intelligence_analysis":
-            request = state.get("intelligence_request")
-            if request is None:
-                return {"error_message": "缺少情报分析请求数据"}
-            
-            query = _build_intelligence_query(request)
-            
-            applicant = request.company_names[0] if request.company_names else None
-            patents = search_patents(
-                query=query,
-                top_k=10,
-                applicant=applicant,
-                start_date=request.start_date,
-                end_date=request.end_date
-            )
-        else:
-            return {"error_message": f"无效的模式: {mode}"}
-        
-        search_results = PatentSearchResult(
-            query=query,
-            patents=patents,
-        )
-        return {"search_results": search_results}
-    except Exception as e:
-        logger.exception("专利检索失败")
-        return {"error_message": f"专利检索失败: {str(e)}"}
-    
-def search_to_analysis_edge(state: PatentAnalysisState) -> str:
+def route_chroma_risk_edge(state: PatentAnalysisState) -> str:
+    # 根据任务类型进行chroma检索
     if state.get("error_message"):
-        logger.error(f"专利检索失败: {state['error_message']}")
+        logger.error(f"路由任务失败: {state['error_message']}")
+        return "end"
+    if state.get("mode") != "risk_analysis":
+        return "end"
+    return "chroma_risk_search"
+
+def route_merge_risk_edge(state: PatentAnalysisState) -> str:
+    if state.get("error_message"):
+        logger.error(f"路由任务失败: {state['error_message']}")
+        return "end"
+    return "merge_risk_search"
+
+def pg_risk_search_node(state: PatentAnalysisState) -> Dict[str, Any]:
+    # risk任务的pg检索
+    try:
+        request = state.get("risk_request")
+        if request is None:
+            return {"error_message": "缺少风险分析请求数据"}
+        query = _build_risk_query(request)
+        results = pg_search_patents(query=query)
+        
+        return {"pg_risk_search_results": PatentSearchResult(query=query, patents=results)}
+    except Exception as e:
+        logger.error(f"PG专利检索失败: {str(e)}")
+        return {"error_message": f"PG专利检索失败: {str(e)}"}
+    
+def chroma_risk_search_node(state: PatentAnalysisState) -> Dict[str, Any]:
+    # risk任务的chroma检索
+    try:
+        request = state.get("risk_request")
+        if request is None:
+            return {"error_message": "缺少风险分析请求数据"}
+        query = _build_risk_query(request)
+        results = chroma_search_patents(query=query)
+        
+        return {"chroma_risk_search_results": PatentSearchResult(query=query, patents=results)}
+    except Exception as e:
+        logger.error(f"Chroma专利检索失败: {str(e)}")
+        return {"error_message": f"Chroma专利检索失败: {str(e)}"}
+
+def merge_risk_search_node(state: PatentAnalysisState) -> Dict[str, Any]:
+    pg_results = state.get("pg_risk_search_results")
+    chroma_results = state.get("chroma_risk_search_results")
+    if not pg_results and not chroma_results:
+        return {"error_message": "缺少专利检索结果数据"}
+    
+    query = pg_results.query if pg_results else chroma_results.query
+    merged_result = _merge_search_results(query, pg_results, chroma_results)
+    return {"merged_risk_results": merged_result}
+
+# =========================================================
+# Intelligence 并行检索节点
+# =========================================================
+
+def route_pg_intelligence_edge(state: PatentAnalysisState) -> str:
+    # 根据任务类型进行路由
+    if state.get("error_message"):
+        logger.error(f"路由任务失败: {state['error_message']}")
+        return "end"
+    if state.get("mode") != "intelligence_analysis":
         return "end"
     
-    mode = state.get("mode")
-    if mode == "risk_analysis":
-        return "risk_analysis"
-    elif mode == "intelligence_analysis":
-        return "intelligence_analysis"
+    return "pg_intelligence_search"
+
+def route_chroma_intelligence_edge(state: PatentAnalysisState) -> str:
+    # 根据任务类型进行路由
+    if state.get("error_message"):
+        logger.error(f"路由任务失败: {state['error_message']}")
+        return "end"
+    if state.get("mode") != "intelligence_analysis":
+        return "end"
     
-    return "end"
+    return "chroma_intelligence_search"
+
+def route_merge_intelligence_edge(state: PatentAnalysisState) -> str:
+    if state.get("error_message"):
+        logger.error(f"路由任务失败: {state['error_message']}")
+        return "end"
+    return "merge_intelligence_search"
+
+def pg_intelligence_search_node(state: PatentAnalysisState) -> Dict[str, Any]:
+    # intelligence任务的pg检索
+    try:
+        request = state.get("intelligence_request")
+        if request is None:
+            return {"error_message": "缺少情报分析请求数据"}
+        query = _build_intelligence_query(request)
+        results = pg_search_patents(query=query)
+        
+        return {"pg_intelligence_search_results": PatentSearchResult(query=query, patents=results)}
+    except Exception as e:
+        logger.error(f"PG专利检索失败: {str(e)}")
+        return {"error_message": f"PG专利检索失败: {str(e)}"}
+
+def chroma_intelligence_search_node(state: PatentAnalysisState) -> Dict[str, Any]:
+    # intelligence任务的chroma检索
+    try:
+        request = state.get("intelligence_request")
+        if request is None:
+            return {"error_message": "缺少情报分析请求数据"}
+        query = _build_intelligence_query(request)
+        results = chroma_search_patents(query=query)
+        
+        return {"chroma_intelligence_search_results": PatentSearchResult(query=query, patents=results)}
+    except Exception as e:
+        logger.error(f"Chroma专利检索失败: {str(e)}")
+        return {"error_message": f"Chroma专利检索失败: {str(e)}"}
+
+def merge_intelligence_search_node(state: PatentAnalysisState) -> Dict[str, Any]:
+    pg_results = state.get("pg_intelligence_search_results")
+    chroma_results = state.get("chroma_intelligence_search_results")
+    if not pg_results and not chroma_results:
+        return {"error_message": "缺少专利检索结果数据"}
+    
+    query = pg_results.query if pg_results else chroma_results.query
+    merged_result = _merge_search_results(query, pg_results, chroma_results)
+    return {"merged_intelligence_results": merged_result}
+
+# =========================================================
+# Analysis 节点
+# =========================================================
 
 def risk_analysis_node(state: PatentAnalysisState) -> Dict[str, Any]:
     try:
         request = state.get("risk_request")
-        search_result = state.get("search_results")
+        search_result = state.get("merged_risk_results")
         if request is None:
             return {"error_message": "缺少风险分析请求数据"}
         if search_result is None:
@@ -190,7 +288,7 @@ def risk_analysis_node(state: PatentAnalysisState) -> Dict[str, Any]:
 def intelligence_analysis_node(state: PatentAnalysisState) -> Dict[str, Any]:
     try:
         request = state.get("intelligence_request")
-        search_result = state.get("search_results")
+        search_result = state.get("merged_intelligence_results")
         if request is None:
             return {"error_message": "缺少情报分析请求数据"}
         if search_result is None:
@@ -212,35 +310,154 @@ def intelligence_analysis_node(state: PatentAnalysisState) -> Dict[str, Any]:
 # =========================================================
 def build_patent_analysis_graph():
     graph = StateGraph(PatentAnalysisState)
-    graph.add_node("routr_task", route_task_node)
-    graph.add_node("search_patents", search_patents_node)
-    graph.add_node("risk_analysis", risk_analysis_node)
-    graph.add_node("intelligence_analysis", intelligence_analysis_node)
     
-    graph.add_edge(START, "routr_task")
+    graph.add_node("route_task", route_task_node)
+    # Risk 分支
+    graph.add_node("pg_risk_search", pg_risk_search_node)
+    graph.add_node("chroma_risk_search", chroma_risk_search_node)
+    graph.add_node("merge_risk_search", merge_risk_search_node)
+    graph.add_node("risk_analysis", risk_analysis_node)
+    # Intelligence 分支
+    graph.add_node("pg_intelligence_search", pg_intelligence_search_node)
+    graph.add_node("chroma_intelligence_search", chroma_intelligence_search_node)
+    graph.add_node("merge_intelligence_search", merge_intelligence_search_node)
+    graph.add_node("intelligence_analysis", intelligence_analysis_node)
+    # 路由边
+    graph.add_edge(START, "route_task")
     graph.add_conditional_edges(
-        "routr_task", 
-        route_task_edge,
+        "route_task",
+        route_chroma_risk_edge,
         {
-            "search_patents": "search_patents",
+            "chroma_risk_search": "chroma_risk_search",
             "end": END
         }
     )
     graph.add_conditional_edges(
-        "search_patents",
-        search_to_analysis_edge,
+        "route_task",
+        route_pg_risk_edge,
         {
-            "risk_analysis": "risk_analysis",
-            "intelligence_analysis": "intelligence_analysis",
+            "pg_risk_search": "pg_risk_search",
             "end": END
         }
     )
+    graph.add_conditional_edges(
+        "route_task",
+        route_chroma_intelligence_edge,
+        {
+            "chroma_intelligence_search": "chroma_intelligence_search",
+            "end": END
+        }
+    )
+    graph.add_conditional_edges(
+        "route_task",
+        route_pg_intelligence_edge,
+        {
+            "pg_intelligence_search": "pg_intelligence_search",
+            "end": END
+        }
+    )
+    
+    # Risk 分支连接
+    graph.add_conditional_edges(
+        "pg_risk_search",
+        route_merge_risk_edge,
+        {
+            "merge_risk_search": "merge_risk_search",
+            "end": END
+        }
+    )
+    graph.add_conditional_edges(
+        "chroma_risk_search",
+        route_merge_risk_edge,
+        {
+            "merge_risk_search": "merge_risk_search",
+            "end": END
+        }
+    )
+    graph.add_edge("merge_risk_search", "risk_analysis")
     graph.add_edge("risk_analysis", END)
+    
+    # Intelligence 分支连接
+    graph.add_conditional_edges(
+        "pg_intelligence_search",
+        route_merge_intelligence_edge,
+        {
+            "merge_intelligence_search": "merge_intelligence_search",
+            "end": END
+        }
+    )
+    graph.add_conditional_edges(
+        "chroma_intelligence_search",
+        route_merge_intelligence_edge,
+        {
+            "merge_intelligence_search": "merge_intelligence_search",
+            "end": END
+        }
+    )
+    graph.add_edge("merge_intelligence_search", "intelligence_analysis")
     graph.add_edge("intelligence_analysis", END)
     
     return graph.compile()
 
-build_patent_analysis_graph = build_patent_analysis_graph()
+patent_analysis_graph = build_patent_analysis_graph()
+
+
+def _print_risk_result_pretty(risk_result: Any) -> None:
+    print("\n===== 风险预筛结果 =====")
+    if hasattr(risk_result, "model_dump"):
+        data = risk_result.model_dump()
+        for key, value in data.items():
+            print(f"- {key}: {value}")
+    else:
+        print(risk_result)
+
+
+def _print_intelligence_result_pretty(intelligence_result: Any) -> None:
+    print("\n===== 竞品情报分析结果 =====")
+
+    summary = getattr(intelligence_result, "summary", None)
+    if summary:
+        print(f"\n【摘要】\n{summary}")
+
+    top_applicants = getattr(intelligence_result, "top_applicants", None) or []
+    if top_applicants:
+        print("\n【Top 申请人】")
+        for idx, item in enumerate(top_applicants, 1):
+            name = getattr(item, "applicant_name", "-")
+            count = getattr(item, "patent_count", "-")
+            topics = getattr(item, "main_topics", []) or []
+            print(f"{idx}. {name} | 专利数: {count} | 主题: {', '.join(topics)}")
+
+    filing_trends = getattr(intelligence_result, "filing_trends", None) or []
+    if filing_trends:
+        print("\n【申请趋势】")
+        for point in filing_trends:
+            period = getattr(point, "period", "-")
+            count = getattr(point, "patent_count", "-")
+            print(f"- {period}: {count}")
+
+    hot_topics = getattr(intelligence_result, "hot_topics", None) or []
+    if hot_topics:
+        print("\n【热点技术】")
+        for idx, topic in enumerate(hot_topics, 1):
+            name = getattr(topic, "name", "-")
+            keywords = getattr(topic, "keywords", []) or []
+            topic_summary = getattr(topic, "summary", "")
+            print(f"{idx}. {name}")
+            print(f"   关键词: {', '.join(keywords)}")
+            if topic_summary:
+                print(f"   说明: {topic_summary}")
+
+    representative_patents = getattr(intelligence_result, "representative_patents", None) or []
+    if representative_patents:
+        print("\n【代表专利】")
+        for idx, patent in enumerate(representative_patents, 1):
+            patent_id = getattr(patent, "patent_id", "-")
+            title = getattr(patent, "title", "-")
+            applicant = getattr(patent, "applicant", "-")
+            pub_date = getattr(patent, "publication_date", "-")
+            print(f"{idx}. [{patent_id}] {title}")
+            print(f"   申请人: {applicant} | 公开日: {pub_date}")
 
 
 if __name__ == "__main__":
@@ -255,5 +472,14 @@ if __name__ == "__main__":
             end_date="2024-12-31"
         )
     }
-    result = build_patent_analysis_graph.invoke(test_state)
-    print("[patent_analysis_agent] smoke test result:", result)
+    result: PatentAnalysisState = patent_analysis_graph.invoke(test_state)
+
+    if result.get("error_message"):
+        print("\n===== 执行失败 =====")
+        print(result["error_message"])
+    elif result.get("risk_result") is not None:
+        _print_risk_result_pretty(result["risk_result"])
+    elif result.get("intelligence_result") is not None:
+        _print_intelligence_result_pretty(result["intelligence_result"])
+    else:
+        print(f"result: {result}")
