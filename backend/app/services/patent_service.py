@@ -1,3 +1,8 @@
+"""
+召回 chunk，用 patent_id 聚合成 document/patent 级结果，
+再返回去重后的 patents，同时附带少量高分 chunk 作为证据；
+所有 applicant、hot domain 等统计都必须基于去重后的 patent 集合，而不是原始 chunk 集合。
+"""
 from typing import List, Optional
 
 from ..models.agent_structs import PatentRecord
